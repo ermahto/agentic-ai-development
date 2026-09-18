@@ -20,37 +20,42 @@ The app is a Spring MVC service. One HTTP call can trigger **one** Gemini hop (o
 ```mermaid
 flowchart TB
     subgraph Client
-        P[Postman / curl / UI]
+        P["Postman / curl / UI"]
     end
 
-    subgraph Spring["Spring Boot — com.ermahto.multiagent"]
-        C[AgentController<br/>POST /api/agents/interact]
-        S[AgentOrchestrationService]
-        Cache[(ConcurrentHashMap<br/>userId:sessionId → ADK Session)]
-        CFG[AgentConfig + AgentProperties]
-        T[JavaSpecialistTool<br/>@Schema delegateToJavaSpecialist]
-        E[GlobalExceptionHandler]
+    subgraph Spring["Spring Boot - com.ermahto.multiagent"]
+        C["AgentController<br/>POST /api/agents/interact"]
+        S["AgentOrchestrationService"]
+        Cache[("Session cache<br/>userId plus sessionId")]
+        CFG["AgentConfig and AgentProperties"]
+        T["JavaSpecialistTool<br/>delegateToJavaSpecialist"]
+        E["GlobalExceptionHandler"]
     end
 
     subgraph ADK["Google ADK 0.5.0"]
-        OR[InMemoryRunner — orchestrator]
-        OA[Orchestrator LlmAgent<br/>gemini-3.6-flash]
-        FT[FunctionTool]
-        SR[InMemoryRunner — specialist]
-        JA[Java Specialist LlmAgent<br/>gemini-3.6-flash]
+        OR["InMemoryRunner orchestrator"]
+        OA["Orchestrator LlmAgent<br/>gemini-3.6-flash"]
+        FT["FunctionTool"]
+        SR["InMemoryRunner specialist"]
+        JA["Java Specialist LlmAgent<br/>gemini-3.6-flash"]
     end
 
-    subgraph Gemini["Google AI Studio"]
-        G[Gemini API]
+    subgraph Studio["Google AI Studio"]
+        G["Gemini API"]
     end
 
-    P --> C --> S
+    P --> C
+    C --> S
     S --> Cache
-    S --> OR --> OA
+    S --> OR
+    OR --> OA
     CFG --> OA
     CFG --> JA
     CFG --> T
-    OA --> FT --> T --> SR --> JA
+    OA --> FT
+    FT --> T
+    T --> SR
+    SR --> JA
     OA --> G
     JA --> G
     S --> C
@@ -79,34 +84,34 @@ sequenceDiagram
     participant Spec as Java Specialist LlmAgent
     participant Gemini as Gemini API
 
-    User->>API: POST /api/agents/interact<br/>{ userId?, sessionId?, question }
-    API->>Svc: interact(request)
-    Svc->>Cache: lookup userId:sessionId
+    User->>API: POST /api/agents/interact
+    API->>Svc: interact request
+    Svc->>Cache: lookup userId and sessionId
     alt session missing
-        Svc->>Orch: sessionService.createSession(...)
+        Svc->>Orch: createSession
         Svc->>Cache: store Session
     end
-    Svc->>Orch: InMemoryRunner.runAsync(user, session, question)
-    Orch->>Gemini: generateContent (system prompt + history + question)
+    Svc->>Orch: runAsync question
+    Orch->>Gemini: generateContent with history
 
-    alt question needs Java / Spring code
-        Gemini-->>Orch: function call delegateToJavaSpecialist(assignment)
+    alt Java or Spring code needed
+        Gemini-->>Orch: function call delegateToJavaSpecialist
         Orch->>Tool: invoke FunctionTool
-        Tool->>Spec: new InMemoryRunner + ephemeral session
-        Spec->>Gemini: generate Java/Spring code
+        Tool->>Spec: ephemeral specialist session
+        Spec->>Gemini: generate Java or Spring code
         Gemini-->>Spec: specialist answer
-        Spec-->>Tool: { status, result }
+        Spec-->>Tool: status and result
         Tool-->>Orch: tool result
         Orch->>Gemini: synthesize user-facing answer
         Gemini-->>Orch: final text
-    else general / non-Java question
-        Gemini-->>Orch: final text (no tool call)
+    else general non-Java question
+        Gemini-->>Orch: final text without tool call
     end
 
-    Orch-->>Svc: Flowable Event stream
-    Svc->>Svc: keep event.finalResponse() text only
+    Orch-->>Svc: Event stream
+    Svc->>Svc: keep finalResponse text only
     Svc-->>API: UserResponse
-    API-->>User: 200 JSON
+    API-->>User: HTTP 200 JSON
 ```
 
 ### Two runtime paths
