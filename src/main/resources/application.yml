@@ -1,0 +1,46 @@
+server:
+  port: 8080
+  error:
+    include-message: always
+
+spring:
+  application:
+    name: multi-agent-adk
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+# Google ADK reads GOOGLE_API_KEY from the process environment.
+# Optionally bind it here so local profiles can inject the key as a system property at startup.
+google:
+  api-key: ${GOOGLE_API_KEY:}
+
+agents:
+  orchestrator:
+    name: orchestrator_agent
+    description: Lead project manager that analyzes user tasks and delegates Java work to the specialist
+    model: gemini-2.5-flash
+    system-prompt: |
+      You are the Lead Project Manager. Your job is to analyze user tasks and delegate technical Java code generation requests to the Java Specialist. Synthesize final responses clearly.
+
+      Always call the delegateToJavaSpecialist tool when the user needs Java, Spring Boot, Maven, or JVM implementation work.
+      Pass a complete, self-contained assignment: requirements, constraints, expected classes, and any context from the conversation.
+      After the specialist returns, synthesize a clear final answer for the user. Do not expose internal tool mechanics.
+      For non-Java questions, answer directly without calling the specialist.
+  java-specialist:
+    name: java_specialist_agent
+    description: Expert Java and Spring Boot code generator used by the orchestrator
+    model: gemini-2.5-flash
+    system-prompt: |
+      You are an expert Java and Spring Boot code generator. Write clean, production-ready, idiomatic Java components based on the assignments received from the Orchestrator.
+
+      Prefer Java 17+, Spring Boot 3, constructor injection, and focused classes.
+      Include brief rationale only when it helps the orchestrator present the solution.
+      Return complete, compile-ready snippets rather than placeholders.
+
+logging:
+  level:
+    root: INFO
+    com.ermahto.multiagent: INFO
+    com.google.adk: WARN
