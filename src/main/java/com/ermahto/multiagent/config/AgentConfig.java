@@ -3,10 +3,10 @@ package com.ermahto.multiagent.config;
 import com.ermahto.multiagent.tool.JavaSpecialistTool;
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.LlmAgent;
+import com.google.adk.models.Gemini;
 import com.google.adk.runner.InMemoryRunner;
 import com.google.adk.tools.FunctionTool;
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,26 +17,23 @@ import org.springframework.util.StringUtils;
 
 @Slf4j
 @Configuration
-@RequiredArgsConstructor
 @EnableConfigurationProperties(AgentProperties.class)
 public class AgentConfig {
 
     private final AgentProperties agentProperties;
+    private final String configuredApiKey;
 
-    @Value("${google.api-key:}")
-    private String googleApiKey;
+    public AgentConfig(
+            AgentProperties agentProperties,
+            @Value("${google.api-key:}") String configuredApiKey) {
+        this.agentProperties = agentProperties;
+        this.configuredApiKey = configuredApiKey;
+    }
 
     @PostConstruct
-    void exportGoogleApiKey() {
-        if (StringUtils.hasText(googleApiKey) && !StringUtils.hasText(System.getenv("GOOGLE_API_KEY"))) {
-            System.setProperty("GOOGLE_API_KEY", googleApiKey);
-        }
-        if (!StringUtils.hasText(System.getenv("GOOGLE_API_KEY"))
-                && !StringUtils.hasText(System.getProperty("GOOGLE_API_KEY"))) {
-            log.warn("GOOGLE_API_KEY is not set. Gemini-backed agents will fail until the key is provided.");
-        } else {
-            log.info("Gemini authentication is configured for Google ADK");
-        }
+    void validateGeminiAccess() {
+        resolveApiKey();
+        log.info("Gemini API key resolved for Google ADK (AI Studio, not Vertex)");
     }
 
     @Bean("javaSpecialistAgent")
@@ -46,7 +43,7 @@ public class AgentConfig {
         return LlmAgent.builder()
                 .name(specialist.name())
                 .description(specialist.description())
-                .model(specialist.model())
+                .model(gemini(specialist.model()))
                 .instruction(specialist.systemPrompt())
                 .build();
     }
@@ -69,7 +66,7 @@ public class AgentConfig {
         return LlmAgent.builder()
                 .name(orchestrator.name())
                 .description(orchestrator.description())
-                .model(orchestrator.model())
+                .model(gemini(orchestrator.model()))
                 .instruction(orchestrator.systemPrompt())
                 .tools(javaSpecialistFunctionTool)
                 .build();
@@ -78,5 +75,42 @@ public class AgentConfig {
     @Bean
     public InMemoryRunner orchestratorRunner(@Qualifier("orchestratorAgent") BaseAgent orchestratorAgent) {
         return new InMemoryRunner(orchestratorAgent);
+    }
+
+    /**
+     * ADK's default Gemini client only reads {@code System.getenv("GOOGLE_API_KEY")}.
+     * Passing the key here also honors Spring {@code google.api-key} and {@code GEMINI_API_KEY}.
+     */
+    private Gemini gemini(String modelName) {
+        return Gemini.builder()
+                .modelName(modelName)
+                .apiKey(resolveApiKey())
+                .build();
+    }
+
+    private String resolveApiKey() {
+        String key = firstNonBlank(
+                System.getenv("GOOGLE_API_KEY"),
+                System.getenv("GEMINI_API_KEY"),
+                configuredApiKey,
+                System.getProperty("GOOGLE_API_KEY"));
+        if (!StringUtils.hasText(key)) {
+            throw new IllegalStateException(
+                    "Gemini API key is missing. Set GOOGLE_API_KEY (or GEMINI_API_KEY) in the process environment, "
+                            + "or set google.api-key in application.yml. System.setProperty is not read by the GenAI client.");
+        }
+        return key.trim();
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (StringUtils.hasText(value)) {
+                return value;
+            }
+        }
+        return null;
     }
 }

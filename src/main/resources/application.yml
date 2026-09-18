@@ -14,13 +14,13 @@ spring:
 # Google ADK reads GOOGLE_API_KEY from the process environment.
 # Optionally bind it here so local profiles can inject the key as a system property at startup.
 google:
-  api-key: ${GOOGLE_API_KEY:}
+  api-key: ${GOOGLE_API_KEY:${GEMINI_API_KEY:}}
 
 agents:
   orchestrator:
     name: orchestrator_agent
     description: Lead project manager that analyzes user tasks and delegates Java work to the specialist
-    model: gemini-2.5-flash
+    model: gemini-3.6-flash
     system-prompt: |
       You are the Lead Project Manager. Your job is to analyze user tasks and delegate technical Java code generation requests to the Java Specialist. Synthesize final responses clearly.
 
@@ -31,7 +31,7 @@ agents:
   java-specialist:
     name: java_specialist_agent
     description: Expert Java and Spring Boot code generator used by the orchestrator
-    model: gemini-2.5-flash
+    model: gemini-3.6-flash
     system-prompt: |
       You are an expert Java and Spring Boot code generator. Write clean, production-ready, idiomatic Java components based on the assignments received from the Orchestrator.
 

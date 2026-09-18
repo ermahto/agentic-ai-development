@@ -28,14 +28,14 @@ AgentOrchestrationService
     │  InMemoryRunner.runAsync(...)  → RxJava Flowable<Event>
     │  blockingForEach  → assemble finalResponse tokens
     ▼
-Orchestrator LlmAgent  (gemini-2.5-flash)
+Orchestrator LlmAgent  (gemini-3.6-flash)
     │
     │  FunctionTool: delegateToJavaSpecialist(assignment)
     ▼
 JavaSpecialistTool
     │  dedicated InMemoryRunner + ephemeral specialist session
     ▼
-Java Specialist LlmAgent  (gemini-2.5-flash)
+Java Specialist LlmAgent  (gemini-3.6-flash)
     │
     ▼
 UserResponse { userId, sessionId, answer }
@@ -160,8 +160,8 @@ Startup is successful when the log includes Tomcat on **port 8080** and:
 
 ```text
 Gemini authentication is configured for Google ADK
-Initializing Java Specialist agent 'java_specialist_agent' on model gemini-2.5-flash
-Initializing Orchestrator agent 'orchestrator_agent' on model gemini-2.5-flash
+Initializing Java Specialist agent 'java_specialist_agent' on model gemini-3.6-flash
+Initializing Orchestrator agent 'orchestrator_agent' on model gemini-3.6-flash
 ```
 
 If you see `GOOGLE_API_KEY is not set`, Gemini calls will fail until the key is present.
@@ -205,6 +205,38 @@ If you see `GOOGLE_API_KEY is not set`, Gemini calls will fail until the key is 
 | `400` | Missing `question`, malformed JSON, or invalid UUID |
 | `502` | ADK / Gemini orchestration failure |
 | `500` | Unexpected server error |
+
+---
+
+## Postman collection
+
+Import these files from `postman/`:
+
+| File | Purpose |
+|---|---|
+| `Multi-Agent-ADK.postman_collection.json` | Requests, assertions, and session variables |
+| `local.postman_environment.json` | Optional environment with `baseUrl=http://localhost:8080` |
+
+**Import:** Postman → **Import** → select both files → choose the **Multi-Agent ADK — Local** environment.
+
+The collection `baseUrl` already defaults to `http://localhost:8080`, so the environment is optional.
+
+| Request | What it checks |
+|---|---|
+| 1. Validation — missing question | HTTP 400, no Gemini call |
+| 2. Validation — malformed JSON | HTTP 400 |
+| 3. Orchestrator only — non-Java question | HTTP 200, managerial answer |
+| 4. Java specialist — generate Spring Boot controller | HTTP 200, Java/Spring content; saves `userId` / `sessionId` |
+| 5. Multi-turn — add service layer | Reuses saved IDs; same session |
+| 6. Explicit IDs — start a known session | Client-supplied UUIDs echoed back |
+
+Run **4 before 5**. Collection tests persist `userId` and `sessionId` after successful interact calls. Gemini-backed requests need `GOOGLE_API_KEY` and can take several seconds.
+
+Newman (optional):
+
+```bat
+npx newman run postman\Multi-Agent-ADK.postman_collection.json --env-var baseUrl=http://localhost:8080
+```
 
 ---
 
@@ -329,11 +361,11 @@ There is no unit-test suite checked in yet; `spring-boot-starter-test` is on the
 agents:
   orchestrator:
     name: orchestrator_agent
-    model: gemini-2.5-flash
+    model: gemini-3.6-flash
     system-prompt: ...
   java-specialist:
     name: java_specialist_agent
-    model: gemini-2.5-flash
+    model: gemini-3.6-flash
     system-prompt: ...
 ```
 
