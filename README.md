@@ -13,41 +13,176 @@ The orchestrator never “guesses” Java implementations when code is required.
 
 ## Architecture
 
+The app is a Spring MVC service. One HTTP call can trigger **one** Gemini hop (orchestrator only) or **two** hops (orchestrator → Java specialist → orchestrator synthesis).
+
+### Logical components
+
+```mermaid
+flowchart TB
+    subgraph Client
+        P[Postman / curl / UI]
+    end
+
+    subgraph Spring["Spring Boot — com.ermahto.multiagent"]
+        C[AgentController<br/>POST /api/agents/interact]
+        S[AgentOrchestrationService]
+        Cache[(ConcurrentHashMap<br/>userId:sessionId → ADK Session)]
+        CFG[AgentConfig + AgentProperties]
+        T[JavaSpecialistTool<br/>@Schema delegateToJavaSpecialist]
+        E[GlobalExceptionHandler]
+    end
+
+    subgraph ADK["Google ADK 0.5.0"]
+        OR[InMemoryRunner — orchestrator]
+        OA[Orchestrator LlmAgent<br/>gemini-3.6-flash]
+        FT[FunctionTool]
+        SR[InMemoryRunner — specialist]
+        JA[Java Specialist LlmAgent<br/>gemini-3.6-flash]
+    end
+
+    subgraph Gemini["Google AI Studio"]
+        G[Gemini API]
+    end
+
+    P --> C --> S
+    S --> Cache
+    S --> OR --> OA
+    CFG --> OA
+    CFG --> JA
+    CFG --> T
+    OA --> FT --> T --> SR --> JA
+    OA --> G
+    JA --> G
+    S --> C
+    E -.-> C
 ```
-Client (JSON)
-    │
-    ▼
-POST /api/agents/interact
-    │
-    ▼
-AgentController
-    │
-    ▼
-AgentOrchestrationService
-    │  ConcurrentHashMap session cache (userId:sessionId)
-    │  InMemoryRunner.runAsync(...)  → RxJava Flowable<Event>
-    │  blockingForEach  → assemble finalResponse tokens
-    ▼
-Orchestrator LlmAgent  (gemini-3.6-flash)
-    │
-    │  FunctionTool: delegateToJavaSpecialist(assignment)
-    ▼
-JavaSpecialistTool
-    │  dedicated InMemoryRunner + ephemeral specialist session
-    ▼
-Java Specialist LlmAgent  (gemini-3.6-flash)
-    │
-    ▼
-UserResponse { userId, sessionId, answer }
+
+| Layer | Class | Responsibility |
+|---|---|---|
+| API | `AgentController` | Accepts JSON, returns `{ userId, sessionId, answer }` |
+| Orchestration | `AgentOrchestrationService` | Session cache, `runAsync`, assemble final tokens |
+| Config | `AgentProperties` / `AgentConfig` | Prompts, model IDs, `Gemini.builder().apiKey(...)` beans |
+| Tool | `JavaSpecialistTool` | Native ADK function the orchestrator can call |
+| Errors | `GlobalExceptionHandler` | 400 validation, 502 ADK/Gemini failures |
+
+### Request flow (end to end)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant API as AgentController
+    participant Svc as AgentOrchestrationService
+    participant Cache as Session cache
+    participant Orch as Orchestrator LlmAgent
+    participant Tool as JavaSpecialistTool
+    participant Spec as Java Specialist LlmAgent
+    participant Gemini as Gemini API
+
+    User->>API: POST /api/agents/interact<br/>{ userId?, sessionId?, question }
+    API->>Svc: interact(request)
+    Svc->>Cache: lookup userId:sessionId
+    alt session missing
+        Svc->>Orch: sessionService.createSession(...)
+        Svc->>Cache: store Session
+    end
+    Svc->>Orch: InMemoryRunner.runAsync(user, session, question)
+    Orch->>Gemini: generateContent (system prompt + history + question)
+
+    alt question needs Java / Spring code
+        Gemini-->>Orch: function call delegateToJavaSpecialist(assignment)
+        Orch->>Tool: invoke FunctionTool
+        Tool->>Spec: new InMemoryRunner + ephemeral session
+        Spec->>Gemini: generate Java/Spring code
+        Gemini-->>Spec: specialist answer
+        Spec-->>Tool: { status, result }
+        Tool-->>Orch: tool result
+        Orch->>Gemini: synthesize user-facing answer
+        Gemini-->>Orch: final text
+    else general / non-Java question
+        Gemini-->>Orch: final text (no tool call)
+    end
+
+    Orch-->>Svc: Flowable Event stream
+    Svc->>Svc: keep event.finalResponse() text only
+    Svc-->>API: UserResponse
+    API-->>User: 200 JSON
 ```
+
+### Two runtime paths
+
+**Path A — Orchestrator only** (for example: “What does a project manager do?”)
+
+1. Controller validates `question`.
+2. Service loads or creates an ADK session.
+3. Orchestrator answers with Gemini.
+4. No `delegateToJavaSpecialist` call.
+5. HTTP `answer` is the orchestrator’s final text.
+
+**Path B — Orchestrator + specialist** (for example: “Generate a Spring Boot REST controller…”)
+
+1. Same session lookup as Path A.
+2. Orchestrator decides the work is Java/Spring and emits a **function call**.
+3. ADK runs `JavaSpecialistTool.delegateToJavaSpecialist(assignment)`.
+4. The tool starts a **separate** specialist `InMemoryRunner` and session (not the user’s chat session).
+5. Specialist returns code; the tool wraps it as `{ status, result }`.
+6. Orchestrator reads the tool result and writes a clear final answer for the user.
+7. HTTP `answer` is that synthesized text, not raw tool JSON.
+
+Server log for Path B includes `Routing assignment to Java Specialist`.
+
+### Session and conversation memory
+
+```
+First request (no IDs)
+    → generate userId + sessionId
+    → ADK createSession(appName, userId, sessionId)
+    → cache key = "userId:sessionId"
+    → response echoes the IDs
+
+Follow-up (same IDs)
+    → cache hit
+    → same ADK session
+    → orchestrator sees prior user/model turns
+```
+
+- **User chat history** lives on the **orchestrator** session (`userId` + `sessionId`).
+- **Specialist runs** are one-shot. Each tool call gets a new specialist session so assignments stay isolated.
+- Cache is **in-memory**. Restarting the JVM drops history.
+
+### How ADK events become the HTTP answer
+
+```
+runner.runAsync(...)
+    → RxJava Flowable<Event>
+    → blockingForEach on the servlet thread
+    → if event.finalResponse() == true
+          append event.stringifyContent()
+    → skip function-call / function-response events
+    → return concatenated text as answer
+```
+
+That filter keeps tool-call internals out of the JSON `answer`.
+
+### Startup wiring
+
+`AgentConfig` builds beans in this order:
+
+1. Resolve Gemini API key (`GOOGLE_API_KEY`, `GEMINI_API_KEY`, or `google.api-key`). Fail fast if missing.
+2. `javaSpecialistAgent` = `LlmAgent` + `Gemini.builder().modelName(...).apiKey(...)`.
+3. `JavaSpecialistTool` wrapping that agent’s `InMemoryRunner`.
+4. `FunctionTool.create(tool, "delegateToJavaSpecialist")`.
+5. `orchestratorAgent` = `LlmAgent` + same Gemini pattern + the function tool.
+6. `orchestratorRunner` = `InMemoryRunner(orchestratorAgent)` injected into the service.
+
+Prompts and model IDs come from `application.yml` → `AgentProperties` records.
 
 ### Design notes
 
-- **Configuration** lives in `application.yml` and binds to immutable records via `@ConfigurationProperties` (`AgentProperties`).
-- **Beans** are wired in `AgentConfig`: two `LlmAgent` instances, a `FunctionTool` wrapping `JavaSpecialistTool`, and the orchestrator `InMemoryRunner`.
-- **Sessions** are created with ADK `sessionService().createSession(...)` and reused by `userId` + `sessionId` so follow-up questions keep conversation history.
-- **Reactive ADK output** is consumed with `runner.runAsync(...).blockingForEach(...)`. Only events where `event.finalResponse()` is true are concatenated, so tool-call payloads are not leaked into the HTTP answer.
-- **Gemini auth** uses the `GOOGLE_API_KEY` environment variable (Google AI Studio). If the env var is missing, `google.api-key` from YAML is copied to the `GOOGLE_API_KEY` system property at startup.
+- **Configuration** lives in `application.yml` and binds to immutable records via `@ConfigurationProperties`.
+- **Gemini auth** is passed into `Gemini.builder().apiKey(...)`. The GenAI SDK does **not** read `System.setProperty("GOOGLE_API_KEY")`; the key must be in the process environment or `google.api-key`.
+- **Reactive ADK output** is consumed with `blockingForEach`. Only `finalResponse()` tokens are returned.
+- Failures from Gemini/ADK are unwrapped and returned as HTTP **502** with the root exception message.
 
 ---
 
